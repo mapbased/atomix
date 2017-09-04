@@ -13,25 +13,35 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package io.atomix.time;
+package io.atomix.storage.journal;
 
 import org.junit.Test;
+
+import java.io.File;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
- * Logical timestamp test.
+ * Journal segment file test.
  */
-public class EpochTest {
+public class JournalSegmentFileTest {
+
   @Test
-  public void testLogicalTimestamp() throws Exception {
-    Epoch epoch = Epoch.of(1);
-    assertEquals(1, epoch.value());
-    assertTrue(epoch.isNewerThan(Epoch.of(0)));
-    assertFalse(epoch.isNewerThan(Epoch.of(2)));
-    assertTrue(epoch.isOlderThan(Epoch.of(2)));
-    assertFalse(epoch.isOlderThan(Epoch.of(0)));
+  public void testIsSegmentFile() throws Exception {
+    assertTrue(JournalSegmentFile.isSegmentFile("foo", "foo-1.log"));
+    assertFalse(JournalSegmentFile.isSegmentFile("foo", "bar-1.log"));
+    assertFalse(JournalSegmentFile.isSegmentFile("foo", "foo-1-1.log"));
   }
+
+  @Test
+  public void testCreateSegmentFile() throws Exception {
+    File file = JournalSegmentFile.createSegmentFile("foo", new File(System.getProperty("user.dir")), 1);
+    assertTrue(JournalSegmentFile.isSegmentFile("foo", file));
+
+    JournalSegmentFile segmentFile = new JournalSegmentFile(file);
+    assertEquals(1, segmentFile.id());
+  }
+
 }
