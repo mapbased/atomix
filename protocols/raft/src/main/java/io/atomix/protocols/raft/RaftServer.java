@@ -19,7 +19,7 @@ import io.atomix.protocols.raft.cluster.MemberId;
 import io.atomix.protocols.raft.cluster.RaftCluster;
 import io.atomix.protocols.raft.cluster.RaftMember;
 import io.atomix.protocols.raft.impl.DefaultRaftServer;
-import io.atomix.protocols.raft.impl.RaftServiceRegistry;
+import io.atomix.protocols.raft.impl.RaftServiceFactoryRegistry;
 import io.atomix.protocols.raft.protocol.RaftServerProtocol;
 import io.atomix.protocols.raft.service.RaftService;
 import io.atomix.protocols.raft.storage.RaftStorage;
@@ -46,9 +46,9 @@ import static com.google.common.base.Preconditions.checkNotNull;
  * for other members in the cluster.
  * <h2>State machines</h2>
  * Underlying each server is a {@link RaftService}. The state machine is responsible for maintaining the state with
- * relation to {@link io.atomix.protocols.raft.RaftCommand}s and {@link io.atomix.protocols.raft.RaftQuery}s submitted
- * to the server by a client. State machines are provided in a factory to allow servers to transition between stateful
- * and stateless states.
+ * relation to {@link io.atomix.protocols.raft.operation.OperationType#COMMAND}s and
+ * {@link io.atomix.protocols.raft.operation.OperationType#QUERY}s submitted to the server by a client. State machines
+ * are provided in a factory to allow servers to transition between stateful and stateless states.
  * <pre>
  *   {@code
  *   Address address = new Address("123.456.789.0", 5000);
@@ -59,13 +59,13 @@ import static com.google.common.base.Preconditions.checkNotNull;
  *     .build();
  *   }
  * </pre>
- * Server state machines are responsible for registering {@link io.atomix.protocols.raft.RaftCommand}s which can be
+ * Server state machines are responsible for registering {@link io.atomix.protocols.raft.operation.OperationType#COMMAND}s which can be
  * submitted to the cluster. Raft relies upon determinism to ensure consistency throughout the cluster, so <em>it is
  * imperative that each server in a cluster have the same state machine with the same commands.</em> State machines are
  * provided to the server as a {@link Supplier factory} to allow servers to {@link RaftMember#promote(RaftMember.Type) transition}
  * between stateful and stateless states.
  * <h2>Storage</h2>
- * As {@link io.atomix.protocols.raft.RaftCommand}s are received by the server, they're written to the Raft
+ * As {@link io.atomix.protocols.raft.operation.OperationType#COMMAND}s are received by the server, they're written to the Raft
  * {@link RaftLog} and replicated to other members
  * of the cluster. By default, the log is stored on disk, but users can override the default {@link RaftStorage} configuration
  * via {@link RaftServer.Builder#withStorage(RaftStorage)}. Most notably, to configure the storage module to store entries in
@@ -136,25 +136,6 @@ import static com.google.common.base.Preconditions.checkNotNull;
  *     });
  *   }
  * </pre>
- * <h2>Server types</h2>
- * Servers form new clusters and join existing clusters as active Raft voting members by default. However, for
- * large deployments Raft also supports alternative types of nodes which are configured by setting the server
- * {@link RaftMember.Type}. For example, the {@link RaftMember.Type#PASSIVE PASSIVE} server type does not participate
- * directly in the Raft consensus algorithm and instead receives state changes via an asynchronous gossip protocol.
- * This allows passive members to scale sequential reads beyond the typical three- or five-node Raft cluster. The
- * {@link RaftMember.Type#RESERVE RESERVE} server type is a stateless server that can act as a standby to the stateful
- * servers in the cluster, being {@link RaftMember#promote(RaftMember.Type) promoted} to a stateful state when necessary.
- * <p>
- * Server types are defined in the server builder simply by passing the initial {@link RaftMember.Type} to the
- * {@link Builder#withType(RaftMember.Type)} setter:
- * <pre>
- *   {@code
- *   RaftServer server = RaftServer.builder(address)
- *     .withType(Member.Type.PASSIVE)
- *     .withTransport(new NettyTransport())
- *     .build();
- *   }
- * </pre>
  *
  * @see RaftService
  * @see RaftStorage
@@ -202,19 +183,17 @@ public interface RaftServer {
     INACTIVE(false),
 
     /**
-     * Represents the state of a server that is a reserve member of the cluster.
-     * <p>
-     * Reserve servers only receive notification of leader, term, and configuration changes.
-     */
-    RESERVE(false),
-
-    /**
      * Represents the state of a server in the process of catching up its log.
      * <p>
      * Upon successfully joining an existing cluster, the server will transition to the passive state and remain there
      * until the leader determines that the server has caught up enough to be promoted to a full member.
      */
     PASSIVE(false),
+
+    /**
+     * Represents the state of a server in the process of being promoted to an active voting member.
+     */
+    PROMOTABLE(false),
 
     /**
      * Represents the state of a server participating in normal log replication.
@@ -479,6 +458,24 @@ public interface RaftServer {
   CompletableFuture<RaftServer> join(Collection<MemberId> members);
 
   /**
+   * Joins the cluster as a passive listener.
+   *
+   * @param cluster A collection of cluster members to join.
+   * @return A completable future to be completed once the local server has joined the cluster as a listener.
+   */
+  default CompletableFuture<RaftServer> listen(MemberId... cluster) {
+    return listen(Arrays.asList(checkNotNull(cluster)));
+  }
+
+  /**
+   * Joins the cluster as a passive listener.
+   *
+   * @param cluster A collection of cluster members to join.
+   * @return A completable future to be completed once the local server has joined the cluster as a listener.
+   */
+  CompletableFuture<RaftServer> listen(Collection<MemberId> cluster);
+
+  /**
    * Promotes the server to leader if possible.
    *
    * @return a future to be completed once the server has been promoted
@@ -541,19 +538,22 @@ public interface RaftServer {
   abstract class Builder implements io.atomix.utils.Builder<RaftServer> {
     private static final Duration DEFAULT_ELECTION_TIMEOUT = Duration.ofMillis(750);
     private static final Duration DEFAULT_HEARTBEAT_INTERVAL = Duration.ofMillis(250);
+    private static final int DEFAULT_ELECTION_THRESHOLD = 3;
     private static final Duration DEFAULT_SESSION_TIMEOUT = Duration.ofMillis(5000);
+    private static final int DEFAULT_SESSION_FAILURE_THRESHOLD = 3;
     private static final ThreadModel DEFAULT_THREAD_MODEL = ThreadModel.SHARED_THREAD_POOL;
     private static final int DEFAULT_THREAD_POOL_SIZE = Runtime.getRuntime().availableProcessors();
 
     protected String name;
-    protected RaftMember.Type type = RaftMember.Type.ACTIVE;
     protected MemberId localMemberId;
     protected RaftServerProtocol protocol;
     protected RaftStorage storage;
     protected Duration electionTimeout = DEFAULT_ELECTION_TIMEOUT;
     protected Duration heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL;
+    protected int electionThreshold = DEFAULT_ELECTION_THRESHOLD;
     protected Duration sessionTimeout = DEFAULT_SESSION_TIMEOUT;
-    protected final RaftServiceRegistry serviceRegistry = new RaftServiceRegistry();
+    protected int sessionFailureThreshold = DEFAULT_SESSION_FAILURE_THRESHOLD;
+    protected final RaftServiceFactoryRegistry serviceRegistry = new RaftServiceFactoryRegistry();
     protected ThreadModel threadModel = DEFAULT_THREAD_MODEL;
     protected int threadPoolSize = DEFAULT_THREAD_POOL_SIZE;
 
@@ -580,8 +580,8 @@ public interface RaftServer {
      * @param type The initial server member type.
      * @return The server builder.
      */
+    @Deprecated
     public Builder withType(RaftMember.Type type) {
-      this.type = checkNotNull(type, "type cannot be null");
       return this;
     }
 
@@ -665,6 +665,22 @@ public interface RaftServer {
     }
 
     /**
+     * Sets the election failure detection threshold.
+     * <p>
+     * This is the phi value at which a follower will attempt to start a new election after not receiving any
+     * communication from the leader.
+     *
+     * @param electionThreshold the election failure detection threshold
+     * @return The Raft server builder
+     * @throws IllegalArgumentException if the threshold is not positive
+     */
+    public Builder withElectionThreshold(int electionThreshold) {
+      checkArgument(electionThreshold > 0, "electionThreshold must be positive");
+      this.electionThreshold = electionThreshold;
+      return this;
+    }
+
+    /**
      * Sets the Raft session timeout, returning the Raft configuration for method chaining.
      *
      * @param sessionTimeout The Raft session timeout duration.
@@ -677,6 +693,21 @@ public interface RaftServer {
       checkArgument(!sessionTimeout.isNegative() && !sessionTimeout.isZero(), "sessionTimeout must be positive");
       checkArgument(sessionTimeout.toMillis() > electionTimeout.toMillis(), "sessionTimeout must be greater than electionTimeout");
       this.sessionTimeout = sessionTimeout;
+      return this;
+    }
+
+    /**
+     * Sets the session failure detection threshold.
+     * <p>
+     * The threshold is a phi value at which sessions will be expired if the leader cannot communicate with the client.
+     *
+     * @param sessionFailureThreshold the session failure threshold
+     * @return The Raft server builder.
+     * @throws IllegalArgumentException if the threshold is not positive
+     */
+    public Builder withSessionFailureThreshold(int sessionFailureThreshold) {
+      checkArgument(sessionFailureThreshold > 0, "sessionFailureThreshold must be positive");
+      this.sessionFailureThreshold = sessionFailureThreshold;
       return this;
     }
 

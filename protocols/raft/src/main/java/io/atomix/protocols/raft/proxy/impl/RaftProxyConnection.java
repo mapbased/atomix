@@ -76,6 +76,23 @@ public class RaftProxyConnection {
   }
 
   /**
+   * Resets the member selector.
+   */
+  public void reset() {
+    selector.reset();
+  }
+
+  /**
+   * Resets the member selector.
+   *
+   * @param leader the selector leader
+   * @param servers the selector servers
+   */
+  public void reset(MemberId leader, Collection<MemberId> servers) {
+    selector.reset(leader, servers);
+  }
+
+  /**
    * Returns the current selector leader.
    *
    * @return The current selector leader.
@@ -85,34 +102,12 @@ public class RaftProxyConnection {
   }
 
   /**
-   * Returns the current set of servers.
+   * Returns the current set of members.
    *
-   * @return The current set of servers.
+   * @return The current set of members.
    */
-  public Collection<MemberId> servers() {
-    return selector.servers();
-  }
-
-  /**
-   * Resets the client connection.
-   *
-   * @return The client connection.
-   */
-  public RaftProxyConnection reset() {
-    selector.reset();
-    return this;
-  }
-
-  /**
-   * Resets the client connection.
-   *
-   * @param leader  The current cluster leader.
-   * @param servers The current servers.
-   * @return The client connection.
-   */
-  public RaftProxyConnection reset(MemberId leader, Collection<MemberId> servers) {
-    selector.reset(leader, servers);
-    return this;
+  public Collection<MemberId> members() {
+    return selector.members();
   }
 
   /**
@@ -253,7 +248,7 @@ public class RaftProxyConnection {
       if (COMPLETE_PREDICATE.test(response)) {
         log.trace("Received {} from {}", response, member);
         future.complete(response);
-        reset();
+        selector.reset();
       } else {
         retryRequest(response.error().createException(), request, sender, member, future);
       }
@@ -281,7 +276,7 @@ public class RaftProxyConnection {
 
     if (!selector.hasNext()) {
       log.debug("Failed to connect to the cluster");
-      reset();
+      selector.reset();
       return null;
     } else {
       this.member = selector.next();

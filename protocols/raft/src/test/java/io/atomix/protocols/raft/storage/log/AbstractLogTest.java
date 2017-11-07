@@ -50,6 +50,7 @@ import java.util.HashSet;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -85,7 +86,7 @@ public abstract class AbstractLogTest {
   protected abstract StorageLevel storageLevel();
 
   protected RaftLog createLog() {
-    return RaftLog.builder()
+    return RaftLog.newBuilder()
         .withName("test")
         .withDirectory(PATH.toFile())
         .withSerializer(serializer)
@@ -105,11 +106,11 @@ public abstract class AbstractLogTest {
     // Append a couple entries.
     Indexed<RaftLogEntry> indexed;
     assertEquals(writer.getNextIndex(), 1);
-    indexed = writer.append(new OpenSessionEntry(1, System.currentTimeMillis(), "client", "test1", "test", ReadConsistency.LINEARIZABLE, 1000));
+    indexed = writer.append(new OpenSessionEntry(1, System.currentTimeMillis(), "client", "test1", "test", ReadConsistency.LINEARIZABLE, 100, 1000));
     assertEquals(indexed.index(), 1);
 
     assertEquals(writer.getNextIndex(), 2);
-    writer.append(new Indexed<>(2, new CloseSessionEntry(1, System.currentTimeMillis(), 1), 0));
+    writer.append(new Indexed<>(2, new CloseSessionEntry(1, System.currentTimeMillis(), 1, false), 0));
     reader.reset(2);
     indexed = reader.next();
     assertEquals(indexed.index(), 2);
@@ -123,7 +124,7 @@ public abstract class AbstractLogTest {
     assertEquals(openSession.entry().term(), 1);
     assertEquals(openSession.entry().serviceName(), "test1");
     assertEquals(openSession.entry().serviceType(), "test");
-    assertEquals(openSession.entry().timeout(), 1000);
+    assertEquals(openSession.entry().maxTimeout(), 1000);
     assertEquals(reader.getCurrentEntry(), openSession);
     assertEquals(reader.getCurrentIndex(), 1);
 
@@ -147,7 +148,7 @@ public abstract class AbstractLogTest {
     assertEquals(openSession.entry().term(), 1);
     assertEquals(openSession.entry().serviceName(), "test1");
     assertEquals(openSession.entry().serviceType(), "test");
-    assertEquals(openSession.entry().timeout(), 1000);
+    assertEquals(openSession.entry().maxTimeout(), 1000);
     assertEquals(reader.getCurrentEntry(), openSession);
     assertEquals(reader.getCurrentIndex(), 1);
     assertTrue(reader.hasNext());
@@ -173,7 +174,7 @@ public abstract class AbstractLogTest {
     assertEquals(openSession.entry().term(), 1);
     assertEquals(openSession.entry().serviceName(), "test1");
     assertEquals(openSession.entry().serviceType(), "test");
-    assertEquals(openSession.entry().timeout(), 1000);
+    assertEquals(openSession.entry().maxTimeout(), 1000);
     assertEquals(reader.getCurrentEntry(), openSession);
     assertEquals(reader.getCurrentIndex(), 1);
     assertTrue(reader.hasNext());
@@ -191,7 +192,7 @@ public abstract class AbstractLogTest {
     // Truncate the log and write a different entry.
     writer.truncate(1);
     assertEquals(writer.getNextIndex(), 2);
-    writer.append(new Indexed<>(2, new CloseSessionEntry(2, System.currentTimeMillis(), 1), 0));
+    writer.append(new Indexed<>(2, new CloseSessionEntry(2, System.currentTimeMillis(), 1, false), 0));
     reader.reset(2);
     indexed = reader.next();
     assertEquals(indexed.index(), 2);
@@ -212,6 +213,33 @@ public abstract class AbstractLogTest {
     assertEquals(reader.getCurrentEntry(), closeSession);
     assertEquals(reader.getCurrentIndex(), 2);
     assertFalse(reader.hasNext());
+  }
+
+  @Test
+  public void testResetTruncateZero() throws Exception {
+    RaftLog log = createLog();
+    RaftLogWriter writer = log.writer();
+    RaftLogReader reader = log.openReader(1, RaftLogReader.Mode.ALL);
+
+    assertEquals(0, writer.getLastIndex());
+    writer.reset(1);
+    assertEquals(0, writer.getLastIndex());
+    writer.append(new InitializeEntry(1, System.currentTimeMillis()));
+    assertEquals(1, writer.getLastIndex());
+    assertEquals(1, writer.getLastEntry().index());
+
+    assertTrue(reader.hasNext());
+    assertEquals(1, reader.next().index());
+
+    writer.truncate(0);
+    assertEquals(0, writer.getLastIndex());
+    assertNull(writer.getLastEntry());
+    writer.append(new InitializeEntry(1, System.currentTimeMillis()));
+    assertEquals(1, writer.getLastIndex());
+    assertEquals(1, writer.getLastEntry().index());
+
+    assertTrue(reader.hasNext());
+    assertEquals(1, reader.next().index());
   }
 
   @Test
